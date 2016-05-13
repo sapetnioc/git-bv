@@ -1,0 +1,528 @@
+#! /usr/bin/env python
+from __future__ import print_function
+
+import os
+import os.path as osp
+from subprocess import check_call, check_output, CalledProcessError
+
+brainvisa_url_pattern = 'brainvisa@catidev.cea.fr:git/{component}.git'
+
+class SourceRepository(object):
+    def __init__(self, directory):
+        self.directory = osp.normpath(osp.abspath(directory))
+        self._default_branch = None
+        
+    @property
+    def default_branch(self):
+        if self._default_branch is None:
+            self._default_branch = self.git_output('config', 'brainvisa.defaultbranch')
+        return self._default_branch
+    
+    @default_branch.setter
+    def default_branch(self, default_branch):
+        self._default_branch = default_branch
+    
+    def call_git(self, *args, **kwargs):
+        cmd = ['git']
+        cmd.extend(args)
+        if 'cwd' not in kwargs:
+            kwargs['cwd'] = self.directory
+        print('--', ' '.join(cmd)) 
+        check_call(cmd, **kwargs)
+    
+    def git_output(self, *args, **kwargs):
+        cmd = ['git']
+        cmd.extend(args)
+        return check_output(cmd, **kwargs).strip()
+
+    def get_git_config(self, key):
+        """
+        Read an item in git configuration
+        """
+        try:
+            return self.git_output('config', key)
+        except CalledProcessError:
+            return None
+
+    def set_git_config(self, key, value):
+        """
+        Set an item in git configuration
+        """
+        self.call_git('config', key, value)
+        
+    def unset_git_config(self, key):
+        """
+        Remove an item in git configuration
+        """
+        self.call_git('config', '--unset', key)
+    
+    def init(self, default_branch):
+        '''
+        Initialize a new source repository
+        '''
+        self.call_git('init', self.directory, cwd=None)
+        self.set_git_config('brainvisa.defaultbranch', default_branch)
+        self.default_branch = default_branch
+        self.call_git('checkout', '-b', default_branch)
+        # Create an empty README file to make a first commit otherwise
+        # git subtree is not working
+        open(osp.join(self.directory, 'README'), 'w')
+        self.call_git('add', 'README')
+        self.call_git('commit', '-m', 'Creation of source directory')
+        self.add_url_pattern('brainvisa', brainvisa_url_pattern)
+    
+    
+    def check_init(self):
+        if not osp.exists(osp.join(self.directory, '.git')):
+            raise RuntimeError('Directory "%s" is not properly initialized.' % self.directory)
+    
+    
+    def info(self):
+        '''
+        Gives information about the configuration of a source repository
+        '''
+        self.check_init()
+        print('Source directory:', self.directory)
+        print('Default branch:', self.default_branch)
+        print('URL patterns:')
+        for name, pattern in self.url_patterns().items():
+            print('   ', name + ':', pattern)
+        print('Components:')
+        for component, url_branch in self.components().items():
+            url, branch = url_branch
+            if branch:
+                print('   ', component + ':', url, branch)
+            else:
+                print('   ', component + ':', url)
+    
+    
+    def add_url_pattern(self, name, url_pattern):
+        self.check_init()
+        up = self.get_git_config('brainvisa.url_pattern.%s' % name)
+        if up:
+            raise RuntimeError('URL pattern "%s" already exists: %s' % (name, up))
+        self.set_git_config('brainvisa.url_pattern.%s' % name, url_pattern)
+    
+    
+    def remove_url_pattern(self, name):
+        self.check_init()
+        self.unset_git_config('brainvisa.url_pattern.%s' % name)
+
+
+    def url_patterns(self):
+        result = {}
+        try:
+            patterns = self.git_output('config', '--get-regex', 'brainvisa.url_pattern.*')
+        except CalledProcessError:
+            return {}
+        for p in patterns.split('\n'):
+            name, pattern = p.split()
+            name = name[len('brainvisa.url_pattern.'):]
+            result[name] = pattern
+        return result
+
+
+    def add_component(self, component, url_or_pattern, requested_branch=None):
+        self.check_init()
+        c = self.get_git_config('brainvisa.component.%s' % component)
+        if c:
+            raise RuntimeError('Component "%s" already exists: %s' % (component, c))
+        url_patterns = self.url_patterns()
+        if url_or_pattern in url_patterns:
+            url = url_patterns[url_or_pattern].format(component=component)
+        else:
+            url = url_or_pattern
+        if requested_branch is None:
+            branch = self.default_branch
+        else:
+            branch = requested_branch
+        
+        self.call_git('remote', 'add', 'brainvisa/component/%s' % component, url)
+        self.call_git('subtree', 'add', '--prefix=%s' % component, 'brainvisa/component/%s' % component, branch)
+        self.set_git_config('brainvisa.component.%s' % component,
+                            ('%s %s' % (url_or_pattern, requested_branch) if requested_branch else url_or_pattern))
+     
+    def remove_component(self, component):
+        self.check_init()    
+        self.call_git('rm', '-r', component)
+        self.call_git('commit', '-m', 'Remove component %s' % component)
+        self.call_git('remote', 'remove', 'brainvisa/component/%s' % component)
+        self.unset_git_config('brainvisa.component.%s' % component)
+     
+    
+    def components(self):
+        """
+        List component names.
+        """
+        result = {}
+        try:
+            patterns = self.git_output('config', '--get-regex', '^brainvisa.component.*')
+        except CalledProcessError:
+            return {}
+        for c in patterns.split('\n'):
+            component, source = c.split(None, 1)
+            component = component[len('brainvisa.component.'):]
+            result[component] = tuple((source.split() + [None])[:2])
+        return result
+         
+         
+if __name__ == '__main__':
+    #------------------------------------------------------------------------
+    # The following code was copied from https://github.com/druths/arghandler
+    # The goal is to have a single file script that can be distributed easily
+    #------------------------------------------------------------------------
+    import sys
+    import argparse
+    import logging
+    import inspect
+
+    __all__ = ['ArgumentHandler','LOG_LEVEL','subcmd']
+
+    LOG_LEVEL='log_level'
+
+    LOG_LEVEL_STR_LOOKUP = { logging.DEBUG:'DEBUG', logging.INFO:'INFO',
+                            logging.WARNING:'WARNING', logging.ERROR:'ERROR',
+                            logging.CRITICAL:'CRITICAL' }
+
+    def default_log_config(level,args):
+        """
+        This is the default function used to configure the logging level.
+        """
+        logging.basicConfig(level=level)
+
+    #################################
+    # decorator
+    #################################
+    registered_subcommands = {}
+    registered_subcommands_help = {}
+    def subcmd(arg=None, **kwargs):
+        """
+        This decorator is used to register functions as subcommands with instances
+        of ArgumentHandler.
+        """
+        if inspect.isfunction(arg):
+            return subcmd_fxn(arg,arg.__name__, kwargs)
+        else:
+            def inner_subcmd(fxn):
+                return subcmd_fxn(fxn, arg, kwargs)
+
+            return inner_subcmd
+
+    def subcmd_fxn(cmd_fxn,name,kwargs):
+        global registered_subcommands
+
+        # get the name of the command
+        if name is None:
+            name = cmd_fxn.__name__
+
+        registered_subcommands[name] = cmd_fxn
+        registered_subcommands_help[name] = kwargs.pop('help','')
+
+        return cmd_fxn
+
+    #########################
+    # ArgumentHandler class
+    #########################
+
+    class ArgumentHandler(argparse.ArgumentParser):
+
+        def __init__(self,*args,**kwargs):
+            """
+            All constructor arguments are the same as found in `argparse.ArgumentParser`.
+
+            kwargs
+            ------
+            * `use_subcommand_help [=False]`: when printing out the help message, use a shortened
+                version of the help message that simply shows the sub-commands supported and
+                their description.
+
+            * `enable_autocompletion [=False]`: make it so that the command line
+                supports autocompletion
+
+            """
+
+            ### extract any special keywords here
+            self._use_subcommand_help = kwargs.pop('use_subcommand_help',False)
+            self._enable_autocompletion = kwargs.pop('enable_autocompletion',False)
+
+            # some internal logic management info
+            self._logging_argument = None
+            self._logging_config_fxn = None
+            self._ignore_remainder = False
+            self._use_subcommands = True
+            self._subcommand_lookup = dict()
+            self._subcommand_help = dict()
+
+            self._has_parsed = False
+
+            # setup the class
+            if self._use_subcommand_help:
+                argparse.ArgumentParser.__init__(self,formatter_class = argparse.RawTextHelpFormatter,*args,**kwargs)
+            else:
+                argparse.ArgumentParser.__init__(self,*args,**kwargs)
+
+        def ignore_subcommands(self):
+            """
+            Force this ArgumentHandler to not handle any subcommands it might find or be given.
+            """
+            self._use_subcommands = False
+
+        def set_logging_argument(self,*names,**kwargs): #,default_level=logging.ERROR,config_fxn=None):
+            """
+            Enable and set an optional argument for setting the logging level that will be
+            used by the built-in logging framework.
+
+            * `names` is the set of positional arguments that will set the logging
+                level.
+
+            * `default_level` is the default logging level that will be set
+
+            * `config_fxn` allows special handling of the logger config.
+                Otherwise, basicConfig will be used. The config function should
+                accept two arguments - the first the logging level, the second the
+                full set of arguments past to the command.
+
+            """
+            # get the keyword args
+            default_level = kwargs.pop('default_level',logging.ERROR)
+            config_fxn = kwargs.pop('config_fxn',default_log_config)
+
+            if len(kwargs) > 0:
+                raise ValueError('unexpected keyword arguments: %s' % ','.join(kwargs.keys()))
+
+            # check the names
+            longest_name = ''
+            for name in names:
+                if not name.startswith('-'):
+                    raise ValueError('all logging level argument names must start with a "-"')
+
+                oname = name.replace('-','')
+                if len(oname) > len(longest_name):
+                    longest_name = oname
+
+            self._logging_argument = longest_name
+
+            # covert default logging level to a string
+            if default_level not in LOG_LEVEL_STR_LOOKUP:
+                raise ValueError('the default logging level must be a valid logging level')
+
+            default_level = LOG_LEVEL_STR_LOOKUP[default_level]
+
+            self._logging_config_fxn = config_fxn
+
+            self.add_argument(*names,choices=['DEBUG','INFO','WARNING','ERROR','CRITICAL'],
+                                default=default_level)
+
+            return
+
+        def add_argument(self,*args,**kwargs):
+            """
+            This has the same functionality as `argparse.ArgumentParser.add_argument`.
+            """
+            # just watch for the REMAINDER nargs to see if subcommands are relevant
+
+            if self._ignore_remainder and 'nargs' in kwargs and kwargs['nargs'] == argparse.REMAINDER:
+                self._use_subcommands = False
+
+            return argparse.ArgumentParser.add_argument(self,*args,**kwargs)
+
+        def set_subcommands(self,subcommand_lookup):
+            """
+            Provide a set of subcommands that this instance of ArgumentHandler should
+            support.  This is an alternative to using the decorator `@subcmd`. Note that
+            the total set of subcommands supported will be those specified in this method
+            combined with those identified by the decorator.
+            """
+            if type(subcommand_lookup) is not dict:
+                raise TypeError('subcommands must be specified as a dict')
+
+            # sanity check the subcommands
+            self._subcommand_lookup = {}
+            self._subcommand_help = {}
+            for cn,cf in subcommand_lookup.items():
+                if type(cn) is not str:
+                    raise TypeError('subcommand keys must be strings. Found %s' % str(cn))
+                if type(cf) == tuple:
+                    if not callable(cf[0]):
+                        raise TypeError('subcommand with name %s must be callable' % cn)
+                    else:
+                        self._subcommand_lookup[cn] = cf[0]
+                        self._subcommand_help[cn] = cf[1]
+                elif not callable(cf):
+                    raise TypeError('subcommand with name %s must be callable' % cn)
+                else:
+                    self._subcommand_lookup[cn] = cf
+                    self._subcommand_help[cn] = ''
+
+            return
+
+        def parse_args(self,argv=None):
+            """
+            Works the same as `argparse.ArgumentParser.parse_args`.
+            """
+            global registered_subcommands, registered_subcommands_help
+
+            if self._has_parsed:
+                raise Exception('ArgumentHandler.parse_args can only be called once')
+
+            # collect subcommands into _subcommand_lookup
+            for cn,cf in registered_subcommands.items():
+                self._subcommand_lookup[cn] = cf
+                self._subcommand_help[cn] = registered_subcommands_help[cn]
+
+            if len(self._subcommand_lookup) == 0:
+                self._use_subcommands = False
+
+            # add in subcommands if appropriate
+            if not self._use_subcommands:
+                pass
+            else:
+                max_cmd_length = max([len(x) for x in self._subcommand_lookup.keys()])
+                subcommands_help_text = 'the subcommand to run'
+                if self._use_subcommand_help:
+                    subcommands_help_text = '\n'
+                    for command in self._subcommand_lookup.keys():
+                        subcommands_help_text += command.ljust(max_cmd_length+2)
+                        subcommands_help_text += self._subcommand_help[command]
+                        subcommands_help_text += '\n'
+                self.add_argument('cmd',choices=self._subcommand_lookup.keys(),help=subcommands_help_text,metavar='subcommand')
+
+                cargs_help_msg = 'arguments for the subcommand' if not self._use_subcommand_help else argparse.SUPPRESS
+                self.add_argument('cargs',nargs=argparse.REMAINDER,help=cargs_help_msg)
+
+            # handle autocompletion if requested
+            if self._enable_autocompletion:
+                import argcomplete
+                argcomplete.autocomplete(self)
+
+            # parse arguments
+            args = argparse.ArgumentParser.parse_args(self,argv)
+            self._has_parse = True
+
+            return args
+
+        def run(self,argv=None,context_fxn=None):
+            """
+            This method triggers a three step process:
+
+            1) Parse the arguments in `argv`. If not specified, `sys.argv` is
+                used.
+
+            2) Configure the logging level.  This only happens if the
+                `set_logging_argument` was called.
+
+            3) Run the appropriate subcommand.  This only happens if subcommands
+                are available and enabled. Prior to the subcommand being run,
+                the `context_fxn` is called.  This function accepts one argument -
+                the namespace returned by a call to `parse_args`.
+
+            The parsed arguments are all returned.
+            """
+            # get the arguments
+            args = self.parse_args(argv)
+
+            # handle the logging argument
+            if self._logging_argument:
+                level = eval('args.%s' % self._logging_argument)
+
+                # convert the level
+                level = eval('logging.%s' % level)
+
+                # call the logging config fxn
+                self._logging_config_fxn(level,args)
+
+            # generate the context
+            context = args
+            if context_fxn:
+                context = context_fxn(args)
+
+            if self._use_subcommands:
+                # create the sub command argument parser
+                scmd_parser = argparse.ArgumentParser(prog='%s %s' % (self.prog,args.cmd))
+
+                # handle the subcommands
+                self._subcommand_lookup[args.cmd](scmd_parser,context,args.cargs)
+
+            return args
+    #------------------------------------------------------------------------
+    # End of code copied from https://github.com/druths/arghandler
+    #------------------------------------------------------------------------
+
+
+    def create_source_repository_object(args):
+        """
+        This method is used by ArgumentHandler to create a context for all
+        subcommands. The context is a SourceRepository instance using the
+        directory define globally (with -C option).
+        """
+        return SourceRepository(args.directory)
+    
+    @subcmd
+    def init(parser,context,args):
+        parser.description = 'Initialize a new source repository'
+        parser.add_argument('main_branch',
+                            nargs='?',
+                            default='master', 
+                            help='Branch (or tag) that will be used by default'
+                            ' when adding a new components. This typically '
+                            'represents the global version of the components '
+                            '(e.g. master, integration or latest_release). '
+                            'Default value is master.')
+        args = parser.parse_args(args)
+        context.init(args.main_branch)
+        
+    @subcmd
+    def info(parser,context,args):
+        parser.description = 'Show information about the configuration of the source repository.'
+        args = parser.parse_args(args)
+        context.info()
+
+    @subcmd
+    def add_url(parser,context,args):
+        parser.description = 'Add an URL pattern to the source repository.'
+        parser.add_argument('name',
+                            help='Name of the URL pattern.')
+        parser.add_argument('url_pattern',
+                            help='Git URL containing a "{component}" string that can be replaced by a component name.')
+        args = parser.parse_args(args)
+        context.add_url_pattern(args.name, args.url_pattern)
+    
+    
+    @subcmd
+    def rm_url(parser,context,args):
+        parser.description = 'Remove an URL pattern from the source repository.'
+        parser.add_argument('name',
+                            help='Name of the URL pattern.')
+        args = parser.parse_args(args)
+        context.remove_url_pattern(args.name)
+    
+    
+    @subcmd
+    def add_component(parser,context,args):
+        parser.description = 'Add a component to the source repository.'
+        parser.add_argument('name',
+                            help='Name of the component.')
+        parser.add_argument('url_or_pattern',
+                            nargs='?', default='brainvisa',
+                            help='The name of a component pattern or a Git URL. Default="brainvisa".')
+        parser.add_argument('branch',
+                            nargs='?', default=None,
+                            help='The name of the branch to use for that component (default = source repository default branch).')
+        args = parser.parse_args(args)
+        context.add_component(args.name, args.url_or_pattern, args.branch)
+    
+    
+    @subcmd
+    def rm_component(parser,context,args):
+        parser.description = 'Remove a component to the source repository.'
+        parser.add_argument('name',
+                            help='Name of the component.')
+        args = parser.parse_args(args)
+        context.remove_component(args.name)
+    
+    handler = ArgumentHandler(use_subcommand_help=True)
+    handler.add_argument('-C', dest='directory', 
+                         default=os.getcwd(), help='Source repository '
+                         'directory. Default = current directory (%s)' % os.getcwd())
+    handler.run(context_fxn=create_source_repository_object)
+    
