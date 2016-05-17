@@ -138,7 +138,10 @@ class SourceRepository(object):
             branch = requested_branch
         
         self.call_git('remote', 'add', 'brainvisa/component/%s' % component, url)
-        self.call_git('subtree', 'add', '--prefix=%s' % component, 'brainvisa/component/%s' % component, branch)
+        try:
+            self.call_git('subtree', 'add', '--prefix=%s' % component, 'brainvisa/component/%s' % component, branch)
+        except:
+            self.call_git('remote', 'remove', 'brainvisa/component/%s' % component)
         self.set_git_config('brainvisa.component.%s' % component,
                             ('%s %s' % (url_or_pattern, requested_branch) if requested_branch else url_or_pattern))
      
