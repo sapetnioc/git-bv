@@ -94,6 +94,8 @@ class SourceRepository(object):
                 print('   ', component + ':', url, branch)
             else:
                 print('   ', component + ':', url)
+            url = self.git_output('remote', 'get-url', 'brainvisa/component/%s' % component)
+            print('        ->', url)
     
     
     def add_url_pattern(self, name, url_pattern):
@@ -142,6 +144,7 @@ class SourceRepository(object):
             self.call_git('subtree', 'add', '--prefix=%s' % component, 'brainvisa/component/%s' % component, branch)
         except:
             self.call_git('remote', 'remove', 'brainvisa/component/%s' % component)
+            raise
         self.set_git_config('brainvisa.component.%s' % component,
                             ('%s %s' % (url_or_pattern, requested_branch) if requested_branch else url_or_pattern))
      
