@@ -24,6 +24,9 @@ class SourceRepository(object):
     Class to interact with a single source directory.
     '''
     
+    readonly_branch = 'git-bv'
+    subtree = False
+    
     def __init__(self, directory):
         self.directory = osp.normpath(osp.abspath(directory))
         self._default_branch = None
@@ -93,7 +96,7 @@ class SourceRepository(object):
         self.call_git('init', self.directory, cwd=None)
         self.set_git_config('brainvisa.defaultbranch', default_branch)
         self.default_branch = default_branch
-        self.call_git('checkout', '-b', default_branch)
+        self.call_git('checkout', '-b', self.readonly_branch)
         # Create an empty README file to make a first commit otherwise
         # git subtree is not working
         open(osp.join(self.directory, 'README'), 'w')
@@ -101,12 +104,12 @@ class SourceRepository(object):
         self.call_git('commit', '-m', 'Creation of source directory')
         self.add_url_pattern('brainvisa', brainvisa_url_pattern)
         # Add a git hook to forbid commits on the default branch
-        pre_commit_path = osp.join(self.directory, '.git', 'hooks', 'pre-commit')
-        pre_commit = open(pre_commit_path, 'w')
-        pre_commit.write(forbid_commit.format(default_branch))
-        pre_commit.close()
-        st = os.stat(pre_commit_path)
-        os.chmod(pre_commit_path, st.st_mode | stat.S_IEXEC)
+        #pre_commit_path = osp.join(self.directory, '.git', 'hooks', 'pre-commit')
+        #pre_commit = open(pre_commit_path, 'w')
+        #pre_commit.write(forbid_commit.format(self.readonly_branch))
+        #pre_commit.close()
+        #st = os.stat(pre_commit_path)
+        #os.chmod(pre_commit_path, st.st_mode | stat.S_IEXEC)
         
 
     def check_init(self):
@@ -176,18 +179,21 @@ class SourceRepository(object):
         else:
             branch = requested_branch
 
-        self.call_git('remote', 'add', 'brainvisa/component/%s' % component,
-                      url)
-        try:
-            self.call_git('subtree', 'add', '--prefix=%s' % component,
-                          'brainvisa/component/%s' % component, branch)
-        except:
-            self.call_git('remote',
-                          'remove', 'brainvisa/component/%s' % component)
-            raise
+        if self.subtree:
+            self.call_git('remote', 'add', 'brainvisa/component/%s' % component,
+                        url)
+            try:
+                self.call_git('subtree', 'add', '--prefix=%s' % component,
+                            'brainvisa/component/%s' % component, branch)
+            except:
+                self.call_git('remote',
+                            'remove', 'brainvisa/component/%s' % component)
+                raise
+        else:
+            self.call_git('submodule', 'add', '-b', branch, url, '%s' % component)
         self.set_git_config('brainvisa.component.%s' % component,
                             ('%s %s' % (url_or_pattern, requested_branch) if
-                             requested_branch else url_or_pattern))
+                            requested_branch else url_or_pattern))
 
     def remove_component(self, component):
         self.check_init()
