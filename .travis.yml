@@ -1,0 +1,21 @@
+language: python
+
+python:
+    - "2.7"
+    - "3.5"
+
+install:
+    - pip install -U pip
+    - pip install -U python-coveralls coverage nose
+    - pip install -e .
+
+script:
+    - nosetests --with-coverage
+
+after_success:
+    # Run coveralls only once, not once for each Python release
+    - if [[ $TRAVIS_PYTHON_VERSION == "3.5" ]]; then
+          coveralls || echo "Coveralls upload failed";
+      else
+          echo "Not running Coveralls";
+      fi
